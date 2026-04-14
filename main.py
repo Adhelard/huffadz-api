@@ -14,9 +14,10 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-        "https://huffadz.portalsi.com",     
+        "http://127.0.0.1:8000",
+        "https://api.ai-islami.com",     
     ],
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "OPTIONS","DELETE"],
     allow_headers=["Authorization", "Content-Type"],
     expose_headers=["*"],
     allow_credentials=True,

@@ -1,2 +1,4 @@
 hafidz.json
 .env
+vector_db/
+**/__pycache__/
