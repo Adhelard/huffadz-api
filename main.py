@@ -28,7 +28,7 @@ app.include_router(users_chats_router, prefix="/api/v1")
 
 @app.get("/")
 def home():
-    return {"message": "Selamat datang di API Chat! Kunjungi /docs untuk melihat endpoint."}
+    return {"message": "API gagal diakses, coba lagi nanti"}
 
 # CARA MENJALANKAN (di terminal):
 # uvicorn main:app --reload

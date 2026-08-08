@@ -1,26 +1,30 @@
 # --- IMPOR LAMA ANDA ---
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from pydantic import BaseModel, Field
 from firebase_config import db # Klien Firestore
 from .auth import get_current_user_data # Dependency Auth
 from typing import List, Optional, Dict, Any
 from google.cloud import firestore # Untuk SERVER_TIMESTAMP
 from qdrant_client import QdrantClient, models
-from typing import List, Optional, Dict, Any
 import time
 import re # Anda mungkin masih membutuhkannya
+import asyncio
 
-# --- 櫨 IMPOR BARU UNTUK RAG + OPENAI ---
+# --- ✨ IMPOR BARU UNTUK RAG + OPENAI ---
 import openai
 import chromadb
 import os
+from dotenv import load_dotenv
 
-QDRANT_URL = "http://194.233.85.152:6333"
-QDRANT_API_KEY = ""
+# Muat file .env secara dinamis
+load_dotenv()
+
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
 QDRANT_COLLECTION_NAME = "islamic_ai_vs" # Sesuai info Anda
 
 try:
-    # Hubungkan ke Qdrant di VPS Anda
+    # Hubungkan ke Qdrant di VPS Anda secara dinamis
     qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY, timeout=30)
     
     # Cek apakah koleksi ada
@@ -34,17 +38,15 @@ except Exception as e:
     print("Pastikan Qdrant server berjalan dan koleksi sudah ada.")
 
 # -----------------------------------------------------------------
-# --- 櫨 1. KLIEN OPENAI & VECTOR DB (KONEKSI "OTAK") ---
+# --- ✨ 1. KLIEN OPENAI & VECTOR DB (KONEKSI "OTAK") ---
 # -----------------------------------------------------------------
 
-# Pastikan Anda mengatur Environment Variable ini di server Anda
-# JANGAN hardcode API key di sini.
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    print("WARNING: OPENAI_API_KEY tidak ditemukan di environment variables.")
 
-    # Di produksi, Anda mungkin ingin ini menghentikan startup server
-    # exit(1) 
-
-# Gunakan AsyncClient untuk FastAPI
-openai_client = openai.AsyncOpenAI(api_key="")
+# Gunakan AsyncClient untuk FastAPI dengan API key dari .env
+openai_client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
 EMBEDDING_MODEL = "text-embedding-3-small"
 # Hubungkan ke database vektor PERSISTENT (folder) yang Anda buat
 try:
@@ -301,24 +303,24 @@ async def _is_islamic_topic_check(prompt_text: str, history: List[Dict[str, Any]
     
     # ... (Baris 2. PERKUAT INSTRUKSI KLASIFIKASI dan sisa fungsi tetap sama)
     system_content = (
-        "Anda adalah sistem peninjau topik yang **CERMAT, TELITI, dan BIJAK** yang beroperasi dalam mode biner. "
-        "Anda **HARUS** menjawab hanya dengan kata tunggal: **'YA'** atau **'TIDAK'**. \n\n"
+        "You are a **WISE and FLEXIBLE** topic reviewer system. Your goal is to be **OPEN-MINDED** but maintain a boundary. "
+        "You **MUST** answer only with a single word: **'Yes'** or **'no'**. \n\n"
         
-        "### PRIORITAS UTAMA: ANALISIS KONTEKS DAN INTENSI ###\n"
-        "1. **Analisis Konteks Berkelanjutan:** Periksa 'RIWAYAT (Context)' terlebih dahulu. JIKA prompt saat ini ('USER SAAT INI') ambigu (misal: 'lanjutkan', 'bagaimana?', 'apa itu') atau sangat singkat, keputusan Anda **WAJIB** mengikuti topik Islami dari RIWAYAT sebelumnya. Ini adalah cara paling bijak untuk menjaga alur percakapan.\n"
-        "2. **Toleransi Typo/Bahasa:** Jika prompt memiliki kesalahan ketik (typo) atau tata bahasa yang buruk, namun **INTENSI** pengguna jelas merujuk pada Islam, Fiqih, atau Syariah, anggap sebagai **'YA'**.\n\n"
+        "### PRIMARY RULE ###\n"
+        "Be inclusive. If a question has even a **slight connection** to Islamic values, ethics, history, or can be answered from an Islamic perspective, categorize as **'Yes'**.\n\n"
 
-        "### KRITERIA 'YA' (Topik Islami) ###\n"
-        "Kategorikan sebagai 'YA' jika pertanyaan berhubungan dengan **apapun** dari lingkup Islam, termasuk:\n"
-        " - Al-Qur'an, Hadits, Sunnah, Tafsir, Sirah, Tauhid, Akhlak, Aqidah, atau Tasawuf.\n"
-        " - Fiqih, Syariah, Hukum Islam (Ibadah, Muamalat, Ekonomi Syariah, Waris, Pernikahan).\n"
-        " - Sejarah Islam, Kisah Nabi/Sahabat, atau Tokoh Ulama.\n"
+        "### 'Yes' CRITERIA (Broad Islamic/Ethical Scope) ###\n"
+        "Categorize as **'Yes'** if the question involves:\n"
+        " - Anything related to religion, spirituality, or faith.\n"
+        " - Moral dilemmas, ethics, or general life advice (as these can be addressed via Islamic wisdom).\n"
+        " - History, culture, or social issues that intersect with Islamic identity.\n"
+        " - Any topic where an Islamic perspective would be meaningful (e.g., 'how to be a good neighbor', 'environmental ethics').\n"
         
-        "### KRITERIA 'TIDAK' (Di Luar Topik) ###\n"
-        "Kategorikan sebagai 'TIDAK' hanya jika topik tersebut secara **DEFINITIF dan MUTLAK** tidak memiliki referensi atau kaitan agama Islam sama sekali, contohnya:\n"
-        " - Resep Masakan (kecuali ditanya tentang hukum halal/haram suatu bahan).\n"
-        " - Berita umum, Politik praktis, Olahraga, Hiburan, atau Selebriti (tanpa ada kaitan Fiqih/Syariah).\n"
-        " - Sains Murni (Fisika, Biologi), Matematika, atau Teknologi (tanpa konteks ajaran Islam tentang alam atau etika)."
+        "### 'no' CRITERIA (Zero Islamic Side) ###\n"
+        "Categorize as **'no'** ONLY if the topic has **ABSOLUTELY ZERO** connection to Islam, morality, or religion, such as:\n"
+        " - Purely technical or scientific questions with no ethical component (e.g., 'how to compile C++ code', 'chemical formula of water').\n"
+        " - Purely secular entertainment or sports trivia (e.g., 'who won the 2022 World Cup', 'latest movie cast').\n"
+        " - Mundane tasks with no religious/ethical angle (e.g., 'how to fix a leaky faucet')."
     )
 
     prompt_for_classifier = history_str + "USER SAAT INI: " + prompt_text
@@ -326,7 +328,7 @@ async def _is_islamic_topic_check(prompt_text: str, history: List[Dict[str, Any]
     try:
         response = await openai_client.chat.completions.create(
             # GANTI MODEL DI SINI:
-            model="gpt-4o", # <-- DIGANTI DARI gpt-3.5-turbo
+            model="gpt-4o-mini", # <-- DIGANTI DARI gpt-4o
             messages=[
                 {"role": "system", "content": system_content},
                 {"role": "user", "content": prompt_for_classifier}
@@ -336,12 +338,52 @@ async def _is_islamic_topic_check(prompt_text: str, history: List[Dict[str, Any]
             max_tokens=3, 
             top_p=1
         )
-        result = response.choices[0].message.content.strip().upper()
-        print(f"--- Klasifikasi Topik Cepat (GPT-4o): {result} ---")
-        return result == 'YA'
+        result = response.choices[0].message.content.strip().lower()
+        print(f"--- Klasifikasi Topik Cepat (GPT-4o-mini): {result} ---")
+        return result == 'yes'
     except Exception as e:
         print(f"Error saat klasifikasi topik: {e}. Menganggap YA (Topik Islam) secara default.")
         return True
+async def _generate_rejection_answer(conversation_id: str, prompt_id: str, prompt_text: str) -> dict:
+    try:
+        response = await openai_client.chat.completions.create(
+            model="gpt-4o-mini", # <-- DIGANTI DARI gpt-4o
+            messages=[
+                {"role": "system", "content": (
+                    "You are a wise and friendly Islamic AI assistant. "
+                    "The user's prompt is outside the scope of Islam, Quran, Hadith, or Sharia. "
+                    "Your task is to generate a polite, warm, and wise rejection. "
+                    "CRITICAL: You MUST detect the language of the user's prompt and respond ENTIRELY in that SAME LANGUAGE. "
+                    "If the user asks in English, you MUST reject in English. If in Indonesian, reject in Indonesian. "
+                )},
+                {"role": "user", "content": prompt_text}
+            ],
+            temperature=0.7,
+            max_tokens=150
+        )
+        rejection_text = response.choices[0].message.content.strip()
+        
+        return {
+            "conversation_id": conversation_id, 
+            "prompt_id": prompt_id,
+            "summary_text": rejection_text,
+            "sources": ["Topic Guardrail"],
+            "quran_examples": [], "hadith_examples": [], "letter_example": None,
+            "introductory_text": rejection_text,
+            "long_form_content": None
+        }
+    except Exception as e:
+        print(f"Error generating rejection: {e}")
+        return {
+            "conversation_id": conversation_id, 
+            "prompt_id": prompt_id,
+            "summary_text": "Maaf, pertanyaan ini di luar fokus utama Huffadz.",
+            "sources": ["Topic Guardrail (Fallback)"],
+            "quran_examples": [], "hadith_examples": [], "letter_example": None,
+            "introductory_text": "Mohon maaf, sepertinya topik ini di luar jangkauan diskusi Islami saya.",
+            "long_form_content": None
+        }
+
 async def _generate_hypothetical_answer(prompt_text: str) -> str:
     """
     Fungsi BARU (HyDE): Mengambil prompt pengguna dan menghasilkan draf
@@ -349,14 +391,14 @@ async def _generate_hypothetical_answer(prompt_text: str) -> str:
     """
     try:
         response = await openai_client.chat.completions.create(
-            model="gpt-4o", 
+            model="gpt-4o-mini", # <-- DIGANTI DARI gpt-4o
             messages=[
                 {"role": "system", "content": (
-                    "Anda adalah seorang ahli tafsir dan hadits yang cerdas. "
-                    "Seorang pengguna akan bertanya sesuatu. Tugas Anda adalah menulis "
-                    "jawaban umum yang ringkas (satu paragraf) untuk pertanyaan mereka, "
-                    "seolah-olah Anda sedang menjelaskan konsepnya. "
-                    "Cukup jelaskan konsepnya saja."    
+                    "You are a brilliant expert in tafsir and hadith. "
+                    "A user will ask something. Your task is to write a concise general answer (one paragraph) "
+                    "to their question, as if you are explaining the concept. "
+                    "Just explain the concept. "
+                    "IMPORTANT: You MUST write the answer in the SAME LANGUAGE as the user's question."
                 )},
                 {"role": "user", "content": prompt_text}
             ],
@@ -364,7 +406,7 @@ async def _generate_hypothetical_answer(prompt_text: str) -> str:
             max_tokens=75
         )
         hypothetical_answer = response.choices[0].message.content.strip()
-        print(f"--- Jawaban Hipotetis (HyDE) Dibuat: '{hypothetical_answer}' ---")
+        print(f"--- Jawaban Hipotetis (HyDE) Dibuat (GPT-4o-mini): '{hypothetical_answer}' ---")
         return hypothetical_answer
     except Exception as e:
         print(f"Error saat generasi HyDE: {e}")
@@ -418,15 +460,15 @@ def _parse_chroma_filter(prompt_text: str) -> Optional[Dict[str, Any]]:
         # Filter ChromaDB menggunakan sintaks Mongo-like
         return {
             "$and": [
-                {"surah": {"$text_contains": surah_name}}, # Cari nama surah yang mengandung teks
+    {"surah": {"$text_contains": surah_name}}, # Cari nama surah yang mengandung teks
                 {"ayah_number": {"$eq": ayah_number}},
             ]
         }
     return None
-# Ganti seluruh fungsi lama Anda dengan yang ini
+
 async def retrieve_relevant_context(prompt_text: str) -> List[str]:
     """
-    Fungsi retrieval yang digabung (Qdrant + Chroma) dengan HyDE.
+    Fungsi retrieval yang digabung (Qdrant + Chroma) dengan HyDE secara paralel.
     Sekarang mendukung flag QDRANT_ENABLED / CHROMA_ENABLED.
     """
     contexts = []
@@ -438,7 +480,9 @@ async def retrieve_relevant_context(prompt_text: str) -> List[str]:
             
             if qdrant_filter:
                 try:
-                    results_exact = qdrant_client.search(
+                    # Run blocking search in a threadpool
+                    results_exact = await asyncio.to_thread(
+                        qdrant_client.search,
                         collection_name=QDRANT_COLLECTION_NAME, # Pastikan ini "islamic_ai_vc"
                         query_vector=None, 
                         query_filter=qdrant_filter,
@@ -454,11 +498,9 @@ async def retrieve_relevant_context(prompt_text: str) -> List[str]:
                         print(f"Total {len(contexts)} konteks (Eksak Qdrant) ditemukan. Melewati pencarian semantik.")
                         return contexts # Langsung kembalikan jika ditemukan eksak
                 except Exception as qe:
-                    print(f"WARNING: Gagal melakukan filter Qdrant (mungkin koleksi salah?): {qe}")
-                    # Jangan hentikan proses, biarkan lanjut ke semantik
+                    print(f"WARNING: Gagal melakukan filter Qdrant: {qe}")
             
         # --- TAHAP 2: TRANSFORMASI HyDE (Pencarian Semantik) ---
-        # (Ini berjalan untuk keduanya, tidak apa-apa)
         hypothetical_answer = await _generate_hypothetical_answer(prompt_text)
         
         # --- TAHAP 3: PENCARIAN VEKTOR (Semantik) ---
@@ -470,79 +512,96 @@ async def retrieve_relevant_context(prompt_text: str) -> List[str]:
         
         all_hits = []
 
-        # 3a. PENCARIAN DI QDRANT (Hanya jika diaktifkan)
-        if QDRANT_ENABLED:
+        # 3a. Definisikan fungsi pencarian async pembungkus I/O sinkron
+        async def search_qdrant():
+            if not QDRANT_ENABLED:
+                return []
             try:
-                results_qdrant = qdrant_client.search(
-                    collection_name=QDRANT_COLLECTION_NAME, # Pastikan ini "islamic_ai_vc"
+                res = await asyncio.to_thread(
+                    qdrant_client.search,
+                    collection_name=QDRANT_COLLECTION_NAME,
                     query_vector=prompt_vector,
                     limit=5,
                     with_payload=True,
                     score_threshold=0.5 
                 )
-                
-                for hit in results_qdrant:
-                    payload = hit.payload
-                    all_hits.append({
-                        "score": hit.score,
-                        "source_type": payload.get('data_type', 'N/A'),
-                        "source_info": payload.get('source', 'N/A'),
-                        "text": payload.get('page_content', 'N/A'),
-                    })
+                return res
             except Exception as qe:
-                 print(f"WARNING: Gagal melakukan search Qdrant (mungkin koleksi salah?): {qe}")
-                 # Lanjutkan ke Chroma
+                print(f"WARNING: Gagal melakukan search Qdrant: {qe}")
+                return []
 
+        async def search_chroma_quran():
+            if not CHROMA_ENABLED:
+                return {}
+            try:
+                res = await asyncio.to_thread(
+                    collection_quran.query,
+                    query_embeddings=[prompt_vector],
+                    n_results=3, 
+                    include=['metadatas', 'documents', 'distances']
+                )
+                return res
+            except Exception as ce:
+                print(f"WARNING: Gagal melakukan query Chroma Quran: {ce}")
+                return {}
 
-        # 3b. PENCARIAN DI CHROMA (Hanya jika diaktifkan)
-        if CHROMA_ENABLED:
-            results_quran_chroma = collection_quran.query(
-                query_embeddings=[prompt_vector],
-                n_results=3, 
-                include=['metadatas', 'documents', 'distances']
-            )
-            results_hadith_chroma = collection_hadith.query(
-                query_embeddings=[prompt_vector],
-                n_results=3, 
-                include=['metadatas', 'documents', 'distances']
-            )
+        async def search_chroma_hadith():
+            if not CHROMA_ENABLED:
+                return {}
+            try:
+                res = await asyncio.to_thread(
+                    collection_hadith.query,
+                    query_embeddings=[prompt_vector],
+                    n_results=3, 
+                    include=['metadatas', 'documents', 'distances']
+                )
+                return res
+            except Exception as ce:
+                print(f"WARNING: Gagal melakukan query Chroma Hadits: {ce}")
+                return {}
 
-            # 3b.i. Proses hasil Quran Chroma
-            if results_quran_chroma.get('metadatas'):
-                for meta, doc, dist in zip(results_quran_chroma['metadatas'][0], results_quran_chroma['documents'][0], results_quran_chroma['distances'][0]):
-                    
-                    # --- 櫨 PERBAIKAN DI SINI 櫨 ---
-                    # Ambil kedua teks dari metadata
-                    arabic_text = meta.get('arabic_text', '[Teks Arab tidak tersedia]')
-                    translation_text = meta.get('original_text', doc)
-                    
-                    # Gabungkan keduanya untuk "text" yang akan dikirim ke AI
-                    combined_text = f"Teks Arab: {arabic_text}\nTerjemahan: {translation_text}"
-                    # --- 櫨 AKHIR PERBAIKAN 櫨 ---
+        # Eksekusi ketiga pencarian secara PARALEL
+        results_qdrant, results_quran_chroma, results_hadith_chroma = await asyncio.gather(
+            search_qdrant(),
+            search_chroma_quran(),
+            search_chroma_hadith()
+        )
 
-                    all_hits.append({
-                        "score": 1 - dist, 
-                        "source_type": 'Quran (Chroma)',
-                        "source_info": f"QS {meta.get('surah', 'N/A')}:{meta.get('ayah_number', 'N/A')}",
-                        "text": combined_text, # <-- Gunakan teks gabungan
-                    })
-                    
-            # 3b.ii. Proses hasil Hadith Chroma
-            if results_hadith_chroma.get('metadatas'):
-                for meta, doc, dist in zip(results_hadith_chroma['metadatas'][0], results_hadith_chroma['documents'][0], results_hadith_chroma['distances'][0]):
-                    
-                    # --- 櫨 PERBAIKAN DI SINI (untuk Hadits) 櫨 ---
-                    arabic_text = meta.get('Arab', '[Teks Arab tidak tersedia]')
-                    translation_text = meta.get('original_text', doc)
-                    combined_text = f"Teks Arab: {arabic_text}\nTerjemahan: {translation_text}"
-                    # --- 櫨 AKHIR PERBAIKAN 櫨 ---
+        # Proses hasil Qdrant
+        for hit in results_qdrant:
+            payload = hit.payload
+            all_hits.append({
+                "score": hit.score,
+                "source_type": payload.get('data_type', 'N/A'),
+                "source_info": payload.get('source', 'N/A'),
+                "text": payload.get('page_content', 'N/A'),
+            })
 
-                    all_hits.append({
-                        "score": 1 - dist,
-                        "source_type": 'Hadith (Chroma)',
-                        "source_info": f"HR {meta.get('Perawi', 'N/A')}",
-                        "text": combined_text, # <-- Gunakan teks gabungan
-                    })
+        # Proses hasil Quran Chroma
+        if results_quran_chroma.get('metadatas'):
+            for meta, doc, dist in zip(results_quran_chroma['metadatas'][0], results_quran_chroma['documents'][0], results_quran_chroma['distances'][0]):
+                arabic_text = meta.get('arabic_text', '[Teks Arab tidak tersedia]')
+                translation_text = meta.get('original_text', doc)
+                combined_text = f"Teks Arab: {arabic_text}\nTerjemahan: {translation_text}"
+                all_hits.append({
+                    "score": 1 - dist, 
+                    "source_type": 'Quran (Chroma)',
+                    "source_info": f"QS {meta.get('surah', 'N/A')}:{meta.get('ayah_number', 'N/A')}",
+                    "text": combined_text,
+                })
+                
+        # Proses hasil Hadith Chroma
+        if results_hadith_chroma.get('metadatas'):
+            for meta, doc, dist in zip(results_hadith_chroma['metadatas'][0], results_hadith_chroma['documents'][0], results_hadith_chroma['distances'][0]):
+                arabic_text = meta.get('Arab', '[Teks Arab tidak tersedia]')
+                translation_text = meta.get('original_text', doc)
+                combined_text = f"Teks Arab: {arabic_text}\nTerjemahan: {translation_text}"
+                all_hits.append({
+                    "score": 1 - dist,
+                    "source_type": 'Hadith (Chroma)',
+                    "source_info": f"HR {meta.get('Perawi', 'N/A')}",
+                    "text": combined_text,
+                })
         
         # --- TAHAP 4: FORMAT HASIL & SELEKSI AKHIR ---
         all_hits.sort(key=lambda x: x['score'], reverse=True)
@@ -558,6 +617,7 @@ async def retrieve_relevant_context(prompt_text: str) -> List[str]:
     except Exception as e:
         print(f"Error saat retrieval gabungan Qdrant/Chroma: {e}")
         return []
+
 # Pastikan fungsi ini mengembalikan DICT, bukan objek Pydantic
 async def generate_smart_answer(conversation_id: str, prompt_id: str, prompt_text: str, history: List[MessageHistory]) -> dict:
     
@@ -572,30 +632,34 @@ async def generate_smart_answer(conversation_id: str, prompt_id: str, prompt_tex
         print("--- RAG SUKSES: Menggunakan Konteks Lokal ---")
         context_string = "\n\n---\n\n".join(relevant_contexts)
         system_prompt_rag = f"""
-        Anda adalah Asisten AI Islami yang cerdas, faktual, dan ahli dalam Al-Qur'an serta Hadits.
-        PERAN ANDA: Bertindak sebagai **konsultan/teman diskusi Islami** yang santai, mendalam, dan memiliki sedikit humor yang bijak/ramah. Gunakan sapaan/gaya bahasa yang komunikatif, seolah Anda sedang ngobrol.
+        You are an intelligent, factual Islamic AI Assistant and expert in Al-Qur'an and Hadith.
+        YOUR ROLE: Act as a **consultant/discussion partner** who is relaxed, deep, and has a bit of wise/friendly humor. Use communicative greetings/language styles, as if you are chatting.
 
-        ### INSTRUKSI GENERASI JAWABAN:
-        1.  **Analisis Inten:** Tentukan apakah pengguna meminta **diskusi/penjelasan mendalam** atau meminta **format dokumen/konten spesifik** (seperti Kultum, Artikel, Surat, atau Pidato).
-            * Jika meminta **dokumen spesifik** (misal: "Buatkan kultum tentang sabar"), fokuskan output Anda pada `long_form_content` dan gunakan format Kultum/Pidato/Surat yang tepat.
-            * Jika meminta **penjelasan/diskusi** (misal: "Apa hikmah sabar?"), fokuskan output Anda pada `long_form_content` sebagai artikel/esai informatif yang terstruktur.
-        2.  **Gaya Diskusif & Penutup:** Bagian `introductory_text` berisi respon yang hangat seperti konfirmasi. Bagian `long_form_content` adalah inti jawaban. Di akhir `long_form_content`, sertakan **pertanyaan retoris**, penegasan yang *engaging*, atau **ajakan untuk merenung/diskusi** topik turunan yang relevan.
-        3.  **Diskusi berkelanjutan**: Anda akan menerima riwayat obrolan sebelumnya. Pastikan jawaban Anda nyambung dan mengingat konteks tersebut.
-        4.  **Konteks Wajib (Multi-Dalil):** Jawaban utama Anda (`long_form_content`) HARUS merangkum dan mengintegrasikan **SEMUA dalil/konteks yang relevan** (Qur'an dan Hadits) yang tersedia di bawah.
-        5.  **Kutipan Spesifik (Parsing) - WAJIB LENGKAP:**
-            * Pilih **maksimal 3 Ayar Al-Qur'an** yang paling utama/jelas untuk di-**PARSE** ke dalam objek `quran_examples`.
-            * Pilih **maksimal 3 Hadits** yang paling utama/jelas untuk di-**PARSE** ke dalam objek `hadith_examples`.
-            * **PENTING (WAJIB):** Saat mem-parsing `quran_examples` dan `hadith_examples`, **PASTIKAN** Anda menyalin `arabic_text` dari konteks ke dalam bidang `arabic_text` di JSON. Konteks akan menyediakannya (biasanya diawali "Teks Arab: ..."). **JANGAN PERNAH** biarkan bidang `arabic_text` kosong/null jika teks Arab tersedia dalam konteks. Ini adalah prioritas utama.
-            * Gunakan `letter_example` HANYA JIKA pengguna secara spesifik meminta *surat resmi* (misal: "Buatkan surat izin tidak masuk sekolah").
-        6.  **Penolakan dengan Persona:** Jika konteks tidak relevan sama sekali, balas dengan gaya khas Anda: "Waduh, pertanyaan ini bagus, tapi 'dalil-dalil segar' saya belum nyambung ke sana nih. Mungkin kita coba 'ngobrolin' topik lain dulu yang lebih dekat dengan referensi kita?"
-        7.  **Format Akhir:** Berikan jawaban Anda dalam format JSON yang valid sesuai skema Pydantic ini:
+        ### MULTILINGUAL & PERSONA INSTRUCTIONS (CRITICAL):
+        1. **Language Detection:** You MUST detect the language of the user's prompt.
+        2. **Language Consistency:** You MUST respond ENTIRELY in the SAME LANGUAGE as the user's prompt (e.g., English for English, Arabic for Arabic, Indonesian for Indonesian).
+        
+        ### ANSWER GENERATION INSTRUCTIONS:
+        1.  **Intent Analysis:** Determine if the user is asking for a **deep discussion/explanation** or a **specific document/content format** (such as Kultum, Article, Letter, or Speech).
+            * If requesting a **specific document** (e.g., "Create a kultum about patience"), focus your output on `long_form_content` using the appropriate format.
+            * If requesting an **explanation/discussion** (e.g., "What is the wisdom of patience?"), focus your output on `long_form_content` as an informative structured article/essay.
+        2.  **Discursive Style & Closing:** The `introductory_text` contains a warm response like confirmation. The `long_form_content` is the core answer. At the end of `long_form_content`, include a **rhetorical question**, an engaging affirmation, or an **invitation to reflect/discuss** relevant derivative topics.
+        3.  **Continuous Discussion:** You will receive previous chat history. Ensure your answer connects and remembers that context.
+        4.  **Mandatory Context (Multi-Evidence):** Your main answer (`long_form_content`) MUST summarize and integrate **ALL relevant evidence/context** (Qur'an and Hadith) available below.
+        5.  **Specific Citations (Parsing) - MANDATORY COMPLETE:**
+            * Select **maximum 3 Quranic Verses** that are most primary/clear to be **PARSED** into `quran_examples` objects.
+            * Select **maximum 3 Hadiths** that are most primary/clear to be **PARSED** into `hadith_examples` objects.
+            * **IMPORTANT (MANDATORY):** When parsing `quran_examples` and `hadith_examples`, **ENSURE** you copy the `arabic_text` from the context into the `arabic_text` field in JSON. The context will provide it (usually starting with "Teks Arab: ..."). **NEVER** leave the `arabic_text` field empty/null if Arabic text is available in the context. This is a top priority.
+            * Use `letter_example` ONLY IF the user specifically requests a *formal/personal letter*.
+        6.  **Persona-based Rejection:** If the context is completely irrelevant, respond in your signature style: "Oops, this is a good question, but my 'fresh evidences' aren't connecting there yet. Maybe we can 'chat' about another topic first that's closer to our references?" (Adapt this to the user's language).
+        7.  **Final Format:** Provide your answer in valid JSON format according to this Pydantic schema:
 
         {SmartAnswerFormatV2.model_json_schema()}
 
         
-        --- KONTEKS DARI DATABASE (QURAN & HADITS) ---
+        --- CONTEXT FROM DATABASE (QURAN & HADITH) ---
         {context_string}
-        --- AKHIR KONTEKS ---
+        --- END OF CONTEXT ---
         """
         
         # 1. Ubah history Pydantic ke format dict standar OpenAI
@@ -665,36 +729,39 @@ async def generate_smart_answer(conversation_id: str, prompt_id: str, prompt_tex
 # --- 櫨 櫨 櫨 AKHIR PERBAIKAN 櫨 櫨 櫨 ---
 
 
-# --- 櫨 5. ENDPOINT PROMPT (TERMODIFIKASI) ---
+def _bg_save_document(collection: str, doc_id: str, data: dict):
+    """Fungsi pembantu untuk menulis dokumen ke Firestore di background thread."""
+    try:
+        db.collection(collection).document(doc_id).set(data)
+    except Exception as e:
+        print(f"Error menulis ke Firestore di background: {e}")
+
+# --- ✨ 5. ENDPOINT PROMPT (TERMODIFIKASI) ---
 # Fungsi ini sekarang akan menerima DICT dari generate_smart_answer
-# users_chats.py (mulai sekitar baris 632)
 @router.post("/prompts", status_code=status.HTTP_201_CREATED)
-async def post_prompt(prmt: Prompt, user_data: dict = Depends(get_current_user_data)):
+async def post_prompt(prmt: Prompt, background_tasks: BackgroundTasks, user_data: dict = Depends(get_current_user_data)):
     
     # ... (Verifikasi sender_uid tetap di sini)
 
     try:
-        # 0. 櫨 LANGKAH BARU: GUARDRAIL KLASIFIKASI TOPIK (Menghemat RAG + GPT-4o) 櫨
+        # 0. ✨ LANGKAH BARU: GUARDRAIL KLASIFIKASI TOPIK (Menghemat RAG + GPT-4o) ✨
         is_relevant = await _is_islamic_topic_check(prmt.prompt_text, history=prmt.history)
         
         if not is_relevant:
-            # Respon Penolakan Cepat dan Hangat (tanpa perlu RAG/GPT-4o)
-            answer_dict_fast_reject = {
-                "conversation_id": prmt.conversation_id, 
-                "prompt_id": "temp_reject",
-                "summary_text": "Maaf, sepertinya pertanyaan ini di luar fokus utama kami.",
-                "sources": ["Topic Guardrail"],
-                "quran_examples": [], "hadith_examples": [], "letter_example": None,
-                "introductory_text": "Masya Allah, pertanyaan yang menarik! Tapi mohon maaf, sepertinya pertanyaan ini di luar 'bidang fokus' saya, yaitu Al-Qur'an, Hadits, Fiqih, dan Syariah. Bagaimana kalau kita coba 'ngobrolin' hikmah puasa atau kisah sahabat saja dulu?",
-                "long_form_content": None
-            }
+            # Respon Penolakan Cepat dan Hangat (sekarang dinamis berdasarkan bahasa pengguna)
+            answer_dict_fast_reject = await _generate_rejection_answer(
+                conversation_id=prmt.conversation_id, 
+                prompt_id="temp_reject",
+                prompt_text=prmt.prompt_text
+            )
             
             # Kita tetap harus menyimpan Prompt (langkah 1)
             data_prompt = prmt.model_dump()
             data_prompt.pop('history', None) 
             data_prompt['timestamp'] = firestore.SERVER_TIMESTAMP 
+            
+            # Generate doc ID lokal (cepat & offline)
             doc_ref_prompt = db.collection(PROMPTS_COLLECTION).document()
-            doc_ref_prompt.set(data_prompt)
             prompt_id = doc_ref_prompt.id
             
             # Kita juga harus menyimpan Answer penolakan (sebagai 'answer')
@@ -702,11 +769,16 @@ async def post_prompt(prmt: Prompt, user_data: dict = Depends(get_current_user_d
             answer_dict_fast_reject['prompt_id'] = prompt_id
             data_answer_db = answer_dict_fast_reject.copy() 
             data_answer_db['timestamp'] = firestore.SERVER_TIMESTAMP
+            
             doc_ref_answer = db.collection(ANSWERS_COLLECTION).document()
-            doc_ref_answer.set(data_answer_db)
+            answer_id = doc_ref_answer.id
+            
+            # Simpan ke Firestore di latar belakang (Background Tasks)
+            background_tasks.add_task(_bg_save_document, PROMPTS_COLLECTION, prompt_id, data_prompt)
+            background_tasks.add_task(_bg_save_document, ANSWERS_COLLECTION, answer_id, data_answer_db)
 
             # Format output yang konsisten
-            answer_dict_fast_reject['answer_id'] = doc_ref_answer.id
+            answer_dict_fast_reject['answer_id'] = answer_id
             answer_dict_fast_reject['timestamp'] = time.time()
             data_prompt['prompt_id'] = prompt_id
             data_prompt['timestamp'] = time.time() # Perlu dikonversi untuk konsistensi
@@ -716,14 +788,12 @@ async def post_prompt(prmt: Prompt, user_data: dict = Depends(get_current_user_d
                 "answer": answer_dict_fast_reject
             }
 
-        # 1. Simpan Prompt (sekarang menjadi langkah yang dibagi, disimpan di dalam IF dan ELSE)
+        # 1. Simpan Prompt
         data_prompt = prmt.model_dump()
-        # 櫨 Hapus history dari data yang disimpan di DB (tidak perlu disimpan)
         data_prompt.pop('history', None) 
-        
         data_prompt['timestamp'] = firestore.SERVER_TIMESTAMP 
+        
         doc_ref_prompt = db.collection(PROMPTS_COLLECTION).document()
-        doc_ref_prompt.set(data_prompt)
         prompt_id = doc_ref_prompt.id
         
         data_prompt['prompt_id'] = prompt_id
@@ -737,20 +807,18 @@ async def post_prompt(prmt: Prompt, user_data: dict = Depends(get_current_user_d
             history=prmt.history
         )
         
-        # ... (Langkah 3 dan 4 Simpan dan Kembalikan seperti semula)
-        # ...
-        
         # 3. Simpan SmartAnswer ke Firestore
-        # 櫨 data_answer_db adalah salinan dari dict
         data_answer_db = smart_answer_dict.copy() 
         data_answer_db['timestamp'] = firestore.SERVER_TIMESTAMP
         
         doc_ref_answer = db.collection(ANSWERS_COLLECTION).document()
-        doc_ref_answer.set(data_answer_db)
         answer_id = doc_ref_answer.id
         
-        # 4. 櫨 PERUBAHAN: Kembalikan data lengkap, bukan status
-        # 櫨 Menambahkan key ke dict
+        # Simpan ke Firestore di latar belakang (Background Tasks)
+        background_tasks.add_task(_bg_save_document, PROMPTS_COLLECTION, prompt_id, data_prompt)
+        background_tasks.add_task(_bg_save_document, ANSWERS_COLLECTION, answer_id, data_answer_db)
+        
+        # 4. ✨ PERUBAHAN: Kembalikan data lengkap, bukan status
         smart_answer_dict['answer_id'] = answer_id
         smart_answer_dict['timestamp'] = time.time()
         
@@ -777,15 +845,11 @@ async def post_prompt_guest(prmt: GuestPrompt):
         is_relevant = await _is_islamic_topic_check(prmt.prompt_text,history=prmt.history)
         
         if not is_relevant:
-            smart_answer_dict = {
-                "conversation_id": guest_conv_id, 
-                "prompt_id": guest_prompt_id,
-                "summary_text": "Maaf, sepertinya pertanyaan ini di luar fokus utama kami.",
-                "sources": ["Topic Guardrail"],
-                "quran_examples": [], "hadith_examples": [], "letter_example": None,
-                "introductory_text": "Masya Allah, pertanyaan yang menarik! Tapi mohon maaf, sepertinya pertanyaan ini di luar 'bidang fokus' saya, yaitu Al-Qur'an, Hadits, Fiqih, dan Syariah. Bagaimana kalau kita coba 'ngobrolin' hikmah puasa atau kisah sahabat saja dulu?",
-                "long_form_content": None
-            }
+            smart_answer_dict = await _generate_rejection_answer(
+                conversation_id=guest_conv_id, 
+                prompt_id=guest_prompt_id,
+                prompt_text=prmt.prompt_text
+            )
         else:
              # 2. Proses Jawaban (Panggil fungsi ASYNC - HANYA JIKA RELEVAN)
             smart_answer_dict = await generate_smart_answer(
